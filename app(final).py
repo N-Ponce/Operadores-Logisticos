@@ -96,6 +96,7 @@ def tabla_costos_modalidad(modalidad: str, clase: str, precio: float):
     })
 
 def puntuar_modalidades(bodega: bool, voluminoso: bool, alta_rot: bool):
+    # Pesos simples y claros; ajustables si lo necesitan
     puntajes = {"Operador Logístico": 0, "Crossdock": 0, "Fulfillment": 0}
     if not bodega:
         puntajes["Fulfillment"] += 3
@@ -131,3 +132,23 @@ with col2:
 precio = st.number_input("Precio referencial del producto (CLP)", min_value=0, value=29990, step=1000)
 
 if st.button("Ver ranking"):
+    tiene_bodega = (bodega == "Sí")
+    es_voluminoso = (voluminoso == "Sí")
+    alta_rot = (rotacion == "Sí")
+
+    ranking = puntuar_modalidades(tiene_bodega, es_voluminoso, alta_rot)
+
+    st.markdown("---")
+    st.subheader("📊 Ranking de modalidades")
+
+    for modalidad, puntaje in ranking:
+        st.markdown(f"### {modalidad} — Puntaje: {puntaje}")
+        st.write(MODALITY_EXPLAIN[modalidad])
+        st.markdown("<div class='section-title'>Costos estimados</div>", unsafe_allow_html=True)
+        st.dataframe(tabla_costos_modalidad(modalidad, clase, float(precio)), use_container_width=True)
+        st.markdown("<div class='section-title'>Beneficios clave</div>", unsafe_allow_html=True)
+        for b in BENEFICIOS[modalidad]:
+            st.write(f"• {b}")
+        st.markdown("---")
+
+st.caption("Nota: El costo para el cliente (despacho final) se calcula con la matriz estándar por zona y tamaño. Es el mismo cálculo en todas las modalidades.")
