@@ -130,4 +130,4 @@ with col2:
 
 precio = st.number_input("Precio referencial del producto (CLP)", min_value=0, value=29990, step=1000)
 
-if st.button("Ver ranking"
+if st.button("Ver ranking")
