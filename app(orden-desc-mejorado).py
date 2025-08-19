@@ -1,139 +1,15 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# APP DE OPERADORES LOGÍSTICOS — v2 (sin descarga CSV, con comparativa Santiago)
+# APP DE OPERADORES LOGÍSTICOS — v2 (formulario, sin Excel)
 # ──────────────────────────────────────────────────────────────────────────────
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 st.set_page_config(page_title="Recomendación de Operadores (v2)", layout="wide")
-st.title("Operadores Logísticos — Recomendador (v2)")
+st.title("Operadores Logísticos — Recomendador (Formulario)")
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.subheader("Configuración")
-
-    # Fuente de datos
-    fuente = st.radio("Fuente de datos", ["Subir Excel", "Ruta local"], horizontal=True)
-    up = None
-    ruta = None
-    if fuente == "Subir Excel":
-        up = st.file_uploader("Carga tu Excel", type=["xlsx"])
-    else:
-        ruta = st.text_input("Ruta local (ej: operadores.xlsx)", "operadores.xlsx")
-
-    # Presets de pesos
-    perfil = st.selectbox(
-        "Prioridad de decisión",
-        ["Balanceado", "Costo primero", "SLA primero", "Cobertura primero"],
-    )
-    presets = {
-        "Balanceado":    {'sla':0.35,'costo':0.25,'capacidad':0.20,'cobertura':0.20},
-        "Costo primero": {'sla':0.25,'costo':0.45,'capacidad':0.15,'cobertura':0.15},
-        "SLA primero":   {'sla':0.50,'costo':0.20,'capacidad':0.15,'cobertura':0.15},
-        "Cobertura primero": {'sla':0.25,'costo':0.20,'capacidad':0.15,'cobertura':0.40},
-    }
-    usar_preset = st.checkbox("Usar preset", value=True)
-
-    if usar_preset:
-        pesos = presets[perfil].copy()
-    else:
-        colw1, colw2 = st.columns(2)
-        with colw1:
-            wsla   = st.slider("Peso SLA", 0.0, 1.0, 0.35, 0.05)
-            wcap   = st.slider("Peso Capacidad", 0.0, 1.0, 0.20, 0.05)
-        with colw2:
-            wcosto = st.slider("Peso Costo", 0.0, 1.0, 0.25, 0.05)
-            wcob   = st.slider("Peso Cobertura", 0.0, 1.0, 0.20, 0.05)
-        s = wsla + wcosto + wcap + wcob
-        if s == 0:
-            pesos = presets["Balanceado"].copy()
-            st.info("Ajusté los pesos a ‘Balanceado’ porque la suma era 0.")
-        else:
-            pesos = {'sla':wsla/s, 'costo':wcosto/s, 'capacidad':wcap/s, 'cobertura':wcob/s}
-
-    top_n = st.slider("¿Cuántas opciones mostrar?", 1, 10, 4)
-
-    st.divider()
-    st.caption("Comparativas")
-    ver_comp_scl = st.checkbox("Mostrar comparativa de despacho en Santiago", value=True)
-
-# ── Utilidades ────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def cargar_excel(uploaded_file=None, path=None) -> pd.DataFrame:
-    if uploaded_file is not None:
-        return pd.read_excel(uploaded_file)
-    return pd.read_excel(path)
-
-def to_numeric(df, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-def normalizar(col):
-    c = col.astype(float)
-    rng = c.max() - c.min()
-    if rng == 0:
-        return pd.Series(1.0, index=c.index)
-    return (c - c.min()) / rng
-
-def calcular_scores(df, pesos):
-    tmp = df.copy()
-
-    # 👉 Ajusta estos nombres a tus columnas reales si difieren:
-    req = ['SLA_on_time','Costo_x_envio','Capacidad_diaria','Cobertura_regiones']
-    faltan = [c for c in req if c not in tmp.columns]
-    if faltan:
-        st.error(f"Faltan columnas requeridas: {faltan}")
-        st.stop()
-
-    # Tipos numéricos e imputación conservadora
-    tmp = to_numeric(tmp, req)
-    for c in req:
-        if tmp[c].isna().all():
-            st.error(f"La columna {c} está completamente vacía.")
-            st.stop()
-        tmp[c] = tmp[c].fillna(tmp[c].median())
-
-    # Normalizaciones
-    tmp['n_sla']       = normalizar(tmp['SLA_on_time'])        # mayor mejor
-    tmp['n_capacidad'] = normalizar(tmp['Capacidad_diaria'])   # mayor mejor
-    tmp['n_cobertura'] = normalizar(tmp['Cobertura_regiones']) # mayor mejor
-    n_costo = normalizar(tmp['Costo_x_envio'])                 # menor mejor
-    tmp['n_costo'] = 1 - n_costo
-
-    # Score
-    tmp['score'] = (
-        pesos['sla']       * tmp['n_sla'] +
-        pesos['costo']     * tmp['n_costo'] +
-        pesos['capacidad'] * tmp['n_capacidad'] +
-        pesos['cobertura'] * tmp['n_cobertura']
-    )
-
-    # Explicación simple (top2 fortalezas + trade-off)
-    def explicar(r):
-        vect = {
-            "SLA alto": r['n_sla'],
-            "Costo competitivo": r['n_costo'],
-            "Alta capacidad": r['n_capacidad'],
-            "Buena cobertura": r['n_cobertura'],
-        }
-        orden = sorted(vect.items(), key=lambda x: x[1], reverse=True)
-        fort = [orden[0][0], orden[1][0]]
-        deb  = min(vect, key=vect.get)
-        return f"Fortalezas: {', '.join(fort)}. Trade-off: {deb}."
-
-    tmp['explicacion'] = tmp.apply(explicar, axis=1)
-
-    # Orden + desempates
-    tmp = tmp.sort_values(
-        by=['score','n_sla','n_cobertura','n_costo','n_capacidad'],
-        ascending=[False, False, False, False, False]
-    ).reset_index(drop=True)
-
-    return tmp
-
-# ── Comparativa Santiago (valores confirmados) ────────────────────────────────
+# ── Datos confirmados que usaremos en explicaciones/costos ────────────────────
+# Comparativa de despacho Santiago: Crossdock vs operadores externos
 CROSSDOCK_SCL = {
     "SP":   {"ripley": 3990,  "externo": 3990},
     "XXS":  {"ripley": 4990,  "externo": 7990},
@@ -144,78 +20,198 @@ CROSSDOCK_SCL = {
     "L/XL": {"ripley": 16990, "externo": 199990},
 }
 
-# ── Carga, filtros y UI ───────────────────────────────────────────────────────
-try:
-    df = None
-    if fuente == "Subir Excel" and up is not None:
-        df = cargar_excel(uploaded_file=up)
-    elif fuente == "Ruta local":
-        df = cargar_excel(path=ruta)
+# Fulfillment: almacenamiento + cofinanciamiento (tabla oficial compartida)
+FULF_STORAGE = [
+    "XXXS: $0,3/día + $1.000 / $2.600 por venta",
+    "S: $7/día + $4.500 por venta",
+    "M1: $20/día + $6.800 por venta",
+    "XXL: $260/día + $8.500 por venta",
+    "XXXL: $400/día + $11.000 por venta",
+]
 
-    if df is not None:
-        st.success("Datos cargados correctamente.")
+# Flota propia (Ripley – Envíame) RM
+FLOTA_ENV = {
+    "SP": 3200, "P1": 3200, "P2": 4990, "P3": 5990, "M": 5990, "G": 6990, "SG": 18740
+}
 
-        # Filtros opcionales si existen
-        with st.expander("Filtros (opcional)"):
-            df_filtrado = df.copy()
-            if 'Categoria' in df.columns:
-                cat_sel = st.multiselect("Categoría", sorted(df['Categoria'].dropna().unique()))
-                if cat_sel: df_filtrado = df_filtrado[df_filtrado['Categoria'].isin(cat_sel)]
-            if 'Region' in df.columns:
-                reg_sel = st.multiselect("Región", sorted(df['Region'].dropna().unique()))
-                if reg_sel: df_filtrado = df_filtrado[df_filtrado['Region'].isin(reg_sel)]
-            if 'Tamano' in df.columns:
-                tam_sel = st.multiselect("Tamaño", sorted(df['Tamano'].dropna().unique()))
-                if tam_sel: df_filtrado = df_filtrado[df_filtrado['Tamano'].isin(tam_sel)]
+# ── Formulario de entrada (sin archivos) ──────────────────────────────────────
+with st.form("selector"):
+    st.subheader("Tu escenario")
 
-        st.markdown("Presiona **Ver opciones** para calcular y mostrar todas las alternativas ordenadas.")
-        if st.button("Ver opciones"):
-            ranking = calcular_scores(df_filtrado, pesos)
+    colA, colB, colC = st.columns(3)
+    with colA:
+        tamano = st.selectbox(
+            "Tamaño del producto",
+            ["SP","XXS","XS","S","M1","M2","L/XL"],
+            help="Usaremos esta tabla de tamaños para la comparativa de Santiago."
+        )
+        region = st.selectbox("Región de operación principal", ["RM","Otra"])
+        volumen = st.number_input("Órdenes diarias (promedio)", min_value=0, step=1, value=10)
 
-            # Top N con ordinales
-            ordinal = {1:"Primero",2:"Segundo",3:"Tercero",4:"Cuarto",5:"Quinto",6:"Sexto",7:"Séptimo",8:"Octavo",9:"Noveno",10:"Décimo"}
-            top = ranking.head(top_n).copy()
-            top['Pos'] = np.arange(1, len(top)+1)
+    with colB:
+        tiene_bodega = st.radio("¿Tienes bodega propia?", ["Sí","No"], index=0)
+        alta_rotacion = st.checkbox("Alta rotación", value=True,
+                                    help="Ventas frecuentes / reposición rápida")
+        necesita_velocidad = st.checkbox("Necesito velocidad de entrega", value=True)
 
-            for _, row in top.iterrows():
-                pos = int(row['Pos'])
-                nombre = row['Operador'] if 'Operador' in row else 'Operador'
-                st.subheader(f"**{ordinal.get(pos, f'#{pos}')}** — {nombre}")
-                st.write(f"**Score:** {row['score']:.3f}")
-                kpi = st.columns(4)
-                with kpi[0]:
-                    st.metric("SLA on-time", f"{row['SLA_on_time']:.1f}%")
-                with kpi[1]:
-                    st.metric("Costo x envío", f"${row['Costo_x_envio']:.0f}")
-                with kpi[2]:
-                    st.metric("Capacidad diaria", f"{int(row['Capacidad_diaria'])}")
-                with kpi[3]:
-                    st.metric("Cobertura (regiones)", f"{int(row['Cobertura_regiones'])}")
-                st.caption(f"**¿Por qué quedó aquí?** {row['explicacion']}")
-                st.divider()
+    with colC:
+        retiro_tienda = st.checkbox("Ofrecer retiro en tienda", value=True)
+        foco_control_marca = st.checkbox("Quiero máximo control/branding de entrega", value=False)
+        cobertura_nacional = st.checkbox("Necesito cobertura nacional", value=True)
 
-            # Tabla completa
-            with st.expander("Ver tabla completa (todas las opciones en orden)"):
-                cols_show = ['Operador','score','SLA_on_time','Costo_x_envio','Capacidad_diaria','Cobertura_regiones']
-                cols_show = [c for c in cols_show if c in ranking.columns]
-                st.dataframe(ranking[cols_show], use_container_width=True)
+    enviado = st.form_submit_button("Ver recomendaciones")
 
-            # Comparativa Santiago (sin gráficos)
-            if ver_comp_scl:
-                st.markdown("### Comparativa de despacho en **Santiago** (Crossdock)")
-                comp = pd.DataFrame([
-                    {"Tamaño": k, "Ripley (Crossdock)": v["ripley"], "Operadores externos": v["externo"]}
-                    for k, v in CROSSDOCK_SCL.items()
-                ])
-                comp['Diferencia'] = comp['Operadores externos'] - comp['Ripley (Crossdock)']
-                comp['Nota'] = comp['Tamaño'].apply(
-                    lambda t: "Diferencia baja en pequeños" if t in ["SP","XXS","XS"]
-                              else "Diferencia significativa en medianos/grandes"
-                )
-                st.dataframe(comp, use_container_width=True)
-                st.info("**Claves**: En productos pequeños la diferencia es baja; en medianos/grandes, Ripley resulta mucho más conveniente (puede ser hasta 12× más barato).")
-    else:
-        st.warning("Carga un Excel o indica una ruta para comenzar.")
+# ── Motor de decisión (coherente/consistente) ────────────────────────────────
+def puntuar_modalidades(
+    tamano, region, volumen, tiene_bodega, alta_rotacion, necesita_velocidad,
+    retiro_tienda, foco_control_marca, cobertura_nacional
+):
+    """
+    Devuelve un DataFrame con score y explicación por modalidad.
+    Criterios ponderados de forma consistente con lo acordado:
+    - Productos grandes en RM favorecen Crossdock (costos confirmados muy inferiores a externos).
+    - Alta rotación y/o sin bodega favorece Fulfillment (a pesar del arriendo).
+    - Control/branding y alto volumen en RM favorecen Flota Propia (Envíame).
+    - Si ya tiene bodega y productos pequeños/medianos, Operador Logístico es natural.
+    """
+    # Normalizaciones y flags
+    en_RM = (region == "RM")
+    sin_bodega = (tiene_bodega == "No")
+    es_pequeno = tamano in ["SP","XXS","XS"]
+    es_mediano = tamano in ["S","M1"]
+    es_grande  = tamano in ["M2","L/XL"]
 
-except Exception as ex:
-    st.error(f"Ocurrió un error: {ex}")
+    # Base de criterios
+    # pesos "globales" (no visibles en UI, pero coherentes con decisiones):
+    W = {
+        "costo": 0.40,        # sensibilidad a costo total
+        "velocidad": 0.25,    # tiempos de entrega / experiencia
+        "control": 0.20,      # control del seller / branding
+        "cobertura": 0.15,    # alcance geográfico / capilaridad
+    }
+
+    # Perfil por modalidad (valores base entre 0..1 antes de ajustar por inputs)
+    perfiles = {
+        "Operador Logístico": {"costo": 0.6, "velocidad": 0.5, "control": 0.8, "cobertura": 0.6},
+        "Crossdock":          {"costo": 0.8, "velocidad": 0.7, "control": 0.6, "cobertura": 0.7},
+        "Fulfillment":        {"costo": 0.5, "velocidad": 0.9, "control": 0.4, "cobertura": 0.8},
+        "Flota Propia":       {"costo": 0.6, "velocidad": 0.7, "control": 1.0, "cobertura": 0.4},
+    }
+
+    # Ajustes por contexto (coherencia con lo conversado)
+    # Tamaño/Región:
+    if en_RM and (es_mediano or es_grande):
+        # Crossdock gana en costo de forma marcada en RM para medianos/grandes
+        perfiles["Crossdock"]["costo"] += 0.15
+        perfiles["Crossdock"]["velocidad"] += 0.05
+    if es_pequeno:
+        # En pequeños, la diferencia de costo vs externos es baja: bajamos ventaja relativa
+        perfiles["Crossdock"]["costo"] -= 0.05
+
+    # Rotación / Bodega
+    if alta_rotacion or sin_bodega:
+        # Fulfillment sube por SLA/velocidad y simplicidad operativa
+        perfiles["Fulfillment"]["velocidad"] += 0.05
+        perfiles["Fulfillment"]["cobertura"] += 0.05
+        perfiles["Fulfillment"]["costo"] -= 0.05  # el costo relativo “se compensa” por eficiencia
+
+    # Control / Branding
+    if foco_control_marca and en_RM and volumen >= 20:
+        perfiles["Flota Propia"]["control"] += 0.05
+        perfiles["Flota Propia"]["velocidad"] += 0.05
+        # costo mejora con volumen (optimización de rutas):
+        perfiles["Flota Propia"]["costo"] += 0.05
+
+    # Cobertura nacional
+    if cobertura_nacional:
+        perfiles["Flota Propia"]["cobertura"] -= 0.1  # limitada a RM
+        perfiles["Operador Logístico"]["cobertura"] += 0.05
+        perfiles["Fulfillment"]["cobertura"] += 0.05
+
+    # Si ya tiene bodega y productos pequeños/medianos → Operador Logístico gana lógica
+    if (tiene_bodega == "Sí") and (es_pequeno or es_mediano):
+        perfiles["Operador Logístico"]["control"] += 0.05
+        perfiles["Operador Logístico"]["costo"] += 0.05
+
+    # Calcular score final por modalidad
+    filas = []
+    for mod, p in perfiles.items():
+        score = (
+            W["costo"]     * p["costo"] +
+            W["velocidad"] * p["velocidad"] +
+            W["control"]   * p["control"] +
+            W["cobertura"] * p["cobertura"]
+        )
+
+        # Explicación breve (top drivers)
+        drivers = sorted(p.items(), key=lambda x: x[1], reverse=True)
+        top2 = [drivers[0][0].capitalize(), drivers[1][0].capitalize()]
+        filas.append({"Modalidad": mod, "score": score, "top": top2, "perfil": p})
+
+    df = pd.DataFrame(filas).sort_values("score", ascending=False).reset_index(drop=True)
+    return df
+
+# ── Render de resultados ─────────────────────────────────────────────────────
+def explicar_costos_y_desventajas(modalidad, tamano, region, volumen):
+    if modalidad == "Crossdock":
+        # Comparativa para Santiago solamente si RM:
+        if region == "RM" and tamano in CROSSDOCK_SCL:
+            r = CROSSDOCK_SCL[tamano]
+            nota = "En pequeños la diferencia es baja; en medianos/grandes la brecha es muy significativa."
+            return (
+                "Desventajas: requiere coordinación con Ripley; depende de bodega en RM.\n"
+                f"Costos (Santiago): Ripley ${r['ripley']:,} vs operadores externos ${r['externo']:,}. {nota}"
+            )
+        else:
+            return "Desventajas: requiere coordinación con Ripley; depende de bodega en RM."
+    elif modalidad == "Fulfillment":
+        lista = " • " + "\n • ".join(FULF_STORAGE)
+        return (
+            "Desventajas: costos de arriendo/operación; menor control directo del inventario.\n"
+            f"Costos confirmados (almacenamiento + cofinanciamiento):\n{lista}"
+        )
+    elif modalidad == "Flota Propia":
+        # Mostrar tarifa solo si el tamaño coincide con el tarifario
+        if tamano in FLOTA_ENV:
+            return (
+                "Desventajas: limitado a RM; requiere organización logística; menor cobertura nacional.\n"
+                f"Tarifa última milla (RM) para {tamano}: ${FLOTA_ENV[tamano]:,}"
+            )
+        else:
+            return (
+                "Desventajas: limitado a RM; requiere organización logística; menor cobertura nacional.\n"
+                "Tarifario confirmado disponible (SP, P1, P2, P3, M, G, SG)."
+            )
+    else:  # Operador Logístico
+        return (
+            "Desventajas: tiempos algo mayores en algunos casos; menor visibilidad de punta a punta.\n"
+            "Costos confirmados primera milla: SP $1.000, P2 $6.690, G $12.990."
+        )
+
+# ── Lógica de ejecución ──────────────────────────────────────────────────────
+if enviado:
+    ranking = puntuar_modalidades(
+        tamano, region, volumen, tiene_bodega, alta_rotacion, necesita_velocidad,
+        retiro_tienda, foco_control_marca, cobertura_nacional
+    )
+
+    st.success("Recomendaciones generadas según tu escenario.")
+    ordinal = {1:"Primero",2:"Segundo",3:"Tercero",4:"Cuarto"}
+
+    for i, row in ranking.iterrows():
+        pos = i + 1
+        mod = row["Modalidad"]
+        st.subheader(f"**{ordinal.get(pos, f'#{pos}')}** — {mod}")
+        st.write(f"**Score:** {row['score']:.3f}")
+        st.caption(f"Fortalezas: {', '.join(row['top'])}.")
+        st.text(explorar := explicar_costos_y_desventajas(mod, tamano, region, volumen))
+        st.divider()
+
+    # Tabla resumen compacta
+    with st.expander("Ver resumen (scores y drivers)"):
+        vista = ranking[["Modalidad","score","top"]].copy()
+        vista["score"] = vista["score"].round(3)
+        st.dataframe(vista, use_container_width=True)
+
+else:
+    st.info("Completa el formulario y presiona **Ver recomendaciones** para ver el orden sugerido.")
