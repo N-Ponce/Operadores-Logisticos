@@ -215,3 +215,64 @@ if enviado:
 
 else:
     st.info("Completa el formulario y presiona **Ver recomendaciones** para ver el orden sugerido.")
+
+
+# ── Render ───────────────────────────────────────────────────────────────────
+if enviado:
+    ranking = puntuar_modalidades(
+        tamano, region, volumen, tiene_bodega,
+        alta_rotacion, necesita_velocidad,
+        retiro_tienda, foco_control_marca, cobertura_nacional
+    )
+
+    st.success("Recomendaciones generadas según tu escenario.")
+    ordinal = {1:"Primero",2:"Segundo",3:"Tercero",4:"Cuarto"}
+
+    for i, row in ranking.iterrows():
+        pos = i + 1
+        mod = row["Modalidad"]
+        st.subheader(f"**{ordinal.get(pos, f'#{pos}')}** — {mod}")
+        st.write(f"**Score:** {row['score']:.3f}")
+
+        # Ventajas, Desventajas y Notas/Costos
+        ventajas, desventajas = ventajas_y_desventajas(
+            mod, tamano, region, volumen, tiene_bodega,
+            alta_rotacion, necesita_velocidad, retiro_tienda,
+            foco_control_marca, cobertura_nacional
+        )
+
+        # Separamos: ventajas / desventajas, y mandamos los costos/notas a la tercera col
+        notas = []
+        ven = []
+        des = []
+        for v in ventajas:
+            if "Tarifa" in v or "$" in v:
+                notas.append(v); ven.append("")
+            else:
+                ven.append(v)
+        for d in desventajas:
+            if "Tarifa" in d or "$" in d:
+                notas.append(d); des.append("")
+            else:
+                des.append(d)
+
+        # Normalizamos largos
+        max_len = max(len(ven), len(des), len(notas))
+        ven += [""]*(max_len - len(ven))
+        des += [""]*(max_len - len(des))
+        notas += [""]*(max_len - len(notas))
+
+        df_comp = pd.DataFrame({
+            "Ventajas": ven,
+            "Desventajas": des,
+            "Notas/Costos": notas
+        })
+
+        st.table(df_comp)
+        st.divider()
+
+    if region == "RM":
+        st.info("**Clave Santiago**: En productos pequeños la diferencia de precio con externos es baja; en medianos/grandes la ventaja de Crossdock (Ripley) es muy significativa.")
+
+else:
+    st.info("Completa el formulario y presiona **Ver recomendaciones** para ver el orden sugerido con tablas comparativas por operador.")
