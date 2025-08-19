@@ -1,30 +1,24 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# APP DE OPERADORES LOGÍSTICOS — v4 (formato tipo ficha por operador)
-# Sin Excel. Render: Título grande (ordinal en fucsia), descripción,
-# "Costos estimados" (tabla sin índice) y "Beneficios clave".
+# APP DE OPERADORES LOGÍSTICOS — v5 (formato ficha + Desventajas)
+# Sin Excel. Fichas por operador: Título (ordinal fucsia), descripción,
+# "Costos estimados" (tabla sin índice), "Beneficios clave" y "Desventajas".
 # ──────────────────────────────────────────────────────────────────────────────
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Recomendación de Operadores (v4)", layout="wide")
+st.set_page_config(page_title="Recomendación de Operadores (v5)", layout="wide")
 st.title("Operadores Logísticos — Recomendador")
 
-# ── Estilos globales (títulos, tablas) ───────────────────────────────────────
+# ── Estilos globales (títulos y tablas) ───────────────────────────────────────
 st.markdown(
     """
     <style>
-    /* Título de bloque: ordinal fucsia + nombre operador negro */
     .rank-title { font-size: 40px; font-weight: 800; margin: 8px 0 0 0; }
-    .rank-badge { color: #E91E63; }                 /* fucsia Ripley */
+    .rank-badge { color: #E91E63; }       /* fucsia Ripley */
     .rank-name  { color: #222; font-weight: 800; }
-
-    /* Subtítulo/descripción */
     .subdesc { font-size: 18px; color: #444; margin: 6px 0 16px 0; }
-
-    /* Encabezado de sección dentro de la ficha */
     .section-h3 { font-size: 22px; font-weight: 800; color: #333; margin: 12px 0 8px 0; }
 
-    /* Afinación tablas streamlit */
     table { width: 100%; border-collapse: separate !important; border-spacing: 0; }
     thead th {
         background: #F6F7F9 !important;
@@ -40,14 +34,13 @@ st.markdown(
         padding: 10px !important;
         border-top: 1px solid #F0F2F5 !important;
     }
-    /* Bordes suavizados (visual) */
     table, tbody tr:last-child td { border-bottom: 1px solid #E5E7EB !important; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ── Datos confirmados para “Notas/Costos” ────────────────────────────────────
+# ── Datos confirmados para costos/notas ───────────────────────────────────────
 CROSSDOCK_SCL = {
     "SP":   {"ripley": 3990,  "externo": 3990},
     "XXS":  {"ripley": 4990,  "externo": 7990},
@@ -86,7 +79,7 @@ with st.form("selector"):
 
     enviado = st.form_submit_button("Ver recomendaciones")
 
-# ── Motor de puntuación simple y consistente ─────────────────────────────────
+# ── Motor de puntuación consistente ──────────────────────────────────────────
 def rank_modalidades(tamano, region, volumen, tiene_bodega, alta_rotacion,
                      retiro_tienda, foco_control_marca):
     en_RM = (region == "RM")
@@ -126,18 +119,17 @@ def rank_modalidades(tamano, region, volumen, tiene_bodega, alta_rotacion,
         filas.append({"Modalidad": mod, "score": score})
     return pd.DataFrame(filas).sort_values("score", ascending=False).reset_index(drop=True)
 
-# ── Contenido de cada tarjeta/ficha ──────────────────────────────────────────
+# ── Descripción, costos, beneficios y desventajas ────────────────────────────
 def descripcion_mod(mod):
     if mod == "Operador Logístico":
         return "El seller maneja su stock y paga la primera milla. El cliente paga el despacho final."
     if mod == "Crossdock":
-        return "Ripley retira/recibe en bodega del seller y distribuye. El cliente paga despacho o retira en tienda."
+        return "Ripley retira/recibe en bodega del seller y distribuye. El cliente paga el despacho o retira en tienda."
     if mod == "Fulfillment":
         return "El stock queda en bodega Ripley; Ripley prepara y despacha. El cliente paga el despacho final."
-    return "El seller usa su propia flota (integrada a Envíame). Define su política de cobro al cliente."
+    return "El seller usa su propia flota (integrada a Envíame) y define su política de cobro al cliente."
 
 def costos_estimados(mod, tamano, region):
-    """Devuelve DataFrame de 3 columnas: Concepto, Detalle, Costo estimado (sin índice)."""
     rows = []
     if mod == "Operador Logístico":
         rows = [
@@ -167,8 +159,7 @@ def costos_estimados(mod, tamano, region):
         else:
             rows = [("Última milla RM", "Tarifario Envíame (SP, P1, P2, P3, M, G, SG)", "Consultar")]
         rows.append(("Operación", "Costos internos de flota", "Combustible, choferes, seguros, mantención"))
-    df = pd.DataFrame(rows, columns=["Concepto", "Detalle", "Costo estimado"])
-    return df.reset_index(drop=True)
+    return pd.DataFrame(rows, columns=["Concepto", "Detalle", "Costo estimado"]).reset_index(drop=True)
 
 def beneficios_clave(mod, tamano, region, volumen, tiene_bodega, alta_rotacion, retiro_tienda, foco_control_marca):
     b = []
@@ -195,7 +186,32 @@ def beneficios_clave(mod, tamano, region, volumen, tiene_bodega, alta_rotacion, 
             b.append("Con volumen en RM, el costo unitario mejora por optimización de rutas.")
     return b
 
-# ── Render tipo “ficha” por operador ─────────────────────────────────────────
+def desventajas_clave(mod, tamano, region, volumen, tiene_bodega, alta_rotacion, retiro_tienda, foco_control_marca):
+    d = []
+    en_RM = (region == "RM")
+    es_peq = tamano in ["SP","XXS","XS"]
+    if mod == "Operador Logístico":
+        d += ["Tiempos algo mayores en algunos casos frente a Crossdock/Fulfillment.",
+              "Menor visibilidad punta a punta comparado con Fulfillment.",
+              "Necesitas gestionar tu bodega (si no tienes, no es ideal).",
+              "Dependencia de la performance del operador de última milla."]
+    elif mod == "Crossdock":
+        d += ["Requiere coordinación con Ripley (ventanas de retiro/entrega).",
+              "Depende de bodega en RM para operar de forma óptima."]
+        if en_RM and es_peq:
+            d.append("En tamaños pequeños la ventaja de costo vs externos es baja.")
+    elif mod == "Fulfillment":
+        d += ["Costos de arriendo y operación del CD de Ripley.",
+              "Menor control directo del inventario (lo gestiona el CD).",
+              "Exige planificación de inbound/outbound al CD.",
+              "SKU de baja rotación acumulan costo de almacenamiento por día."]
+    elif mod == "Flota Propia":
+        d += ["Cobertura principalmente RM (nacional acotada).",
+              "Requiere inversión y gestión logística (personal, vehículos, seguros, mantención).",
+              "Riesgo operativo si baja el volumen (ociosas rutas/costos fijos)."]
+    return d
+
+# ── Render de fichas ─────────────────────────────────────────────────────────
 def render_ficha(ordinal_txt, modalidad, score, tamano, region, volumen,
                  tiene_bodega, alta_rotacion, retiro_tienda, foco_control_marca):
     st.markdown(
@@ -205,14 +221,20 @@ def render_ficha(ordinal_txt, modalidad, score, tamano, region, volumen,
     )
     st.markdown(f'<div class="subdesc">{descripcion_mod(modalidad)}</div>', unsafe_allow_html=True)
 
-    # Costos estimados (tabla sin índice)
+    # Costos estimados
     st.markdown('<div class="section-h3">Costos estimados</div>', unsafe_allow_html=True)
-    st.table(costos_estimados(modalidad, tamano, region))  # reset_index en función
+    st.table(costos_estimados(modalidad, tamano, region))  # viene sin índice
 
-    # Beneficios clave (lista)
+    # Beneficios
     st.markdown('<div class="section-h3">Beneficios clave</div>', unsafe_allow_html=True)
     for item in beneficios_clave(modalidad, tamano, region, volumen,
                                  tiene_bodega, alta_rotacion, retiro_tienda, foco_control_marca):
+        st.write(f"• {item}")
+
+    # Desventajas
+    st.markdown('<div class="section-h3">Desventajas</div>', unsafe_allow_html=True)
+    for item in desventajas_clave(modalidad, tamano, region, volumen,
+                                  tiene_bodega, alta_rotacion, retiro_tienda, foco_control_marca):
         st.write(f"• {item}")
 
     st.markdown("---")
@@ -236,4 +258,4 @@ if enviado:
     if region == "RM":
         st.info("**Clave Santiago**: en productos pequeños la diferencia de precio con externos es baja; en medianos/grandes la ventaja de Crossdock es muy significativa.")
 else:
-    st.info("Completa el formulario y presiona **Ver recomendaciones** para ver las fichas por operador en el formato solicitado.")
+    st.info("Completa el formulario y presiona **Ver recomendaciones** para ver las fichas por operador con Beneficios y Desventajas.")
