@@ -1,170 +1,221 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# APP DE OPERADORES LOGÍSTICOS — v2 (sin descarga CSV, con comparativa Santiago)
+# ──────────────────────────────────────────────────────────────────────────────
 import streamlit as st
 import pandas as pd
+import numpy as np
 
-# ---------- Configuración ----------
-st.set_page_config(page_title="Guía Logística Ripley – Orden de Recomendación", page_icon="🚚", layout="centered")
-PRIMARY = "#E6007E"; BLACK = "#000000"
+st.set_page_config(page_title="Recomendación de Operadores (v2)", layout="wide")
+st.title("Operadores Logísticos — Recomendador (v2)")
 
-st.markdown(
-    f"""
-    <style>
-    .main .block-container {{ padding-top: 2rem; padding-bottom: 3rem; }}
-    .ripley-title {{ font-weight: 800; font-size: 1.8rem; color: {BLACK}; margin-bottom: 0.2rem; }}
-    .ripley-sub {{ color: #555; margin-bottom: 1.2rem; }}
-    .badge {{ border: 1px solid {PRIMARY}; color: {PRIMARY}; padding: 0.2rem 0.5rem; border-radius: 8px; font-size: 0.8rem; }}
-    .section-title {{ margin-top: 1.2rem; font-size: 1.1rem; font-weight: 700; }}
-    .ordinal {{ font-weight: 800; color: {PRIMARY}; margin-right: .35rem; }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.subheader("Configuración")
 
-# ---------- Datos ----------
-FIRST_MILE = {
-    "SP": {"lt_24990": 1000, "ge_24990": 2690},
-    "P1": {"flat": 4590},
-    "P2": {"flat": 6690},
-    "P3": {"flat": 7790},
-    "M": {"flat": 8790},
-    "G": {"flat": 12990},
-    "SG": {"flat": 21490},
-}
-REVERSE = {
-    "SP": 2800, "P1": 2800, "P2": 6000, "P3": 11000,
-    "M": 20000, "G": 23900, "SG": 23900
-}
-CLASSES_INFO = {
-    "SP": "Super Pequeño (ej: smartphone)",
-    "P1": "Pequeño 1 (ej: bici infantil)",
-    "P2": "Pequeño 2 (ej: silla de escritorio)",
-    "P3": "Pequeño 3 (ej: set de 4 neumáticos)",
-    "M": "Mediano (ej: congeladora)",
-    "G": "Grande (ej: living)",
-    "SG": "Súper Grande (ej: sofá seccional)",
-}
-MODALITY_EXPLAIN = {
-    "Operador Logístico": "El seller maneja su stock y paga la primera milla. El cliente paga el despacho final.",
-    "Crossdock": "Ripley retira en la bodega del seller. Cliente paga despacho final o $0 si retiro en tienda.",
-    "Fulfillment": "Ripley almacena y opera inventario (cofinanciado). Cliente paga despacho final.",
-    "Flota Propia": "Transporte especializado/aliado (p. ej. Envíame) para cargas voluminosas o rutas especiales.",
-}
-BENEFICIOS = {
-    "Operador Logístico": [
-        "Control total del inventario en tu bodega.",
-        "Pagas primera milla por OC y mantienes flexibilidad.",
-        "Ideal para productos pequeños/medianos y rotación moderada."
-    ],
-    "Crossdock": [
-        "Ripley retira en tu bodega: menos fricción operacional.",
-        "Puedes ofrecer retiro en tienda (cliente sin costo de despacho).",
-        "Útil para órdenes grandes o productos voluminosos."
-    ],
-    "Fulfillment": [
-        "Mayor conversión por velocidad de despacho.",
-        "Ripley opera almacenamiento, picking y packing.",
-        "Recomendado para alta rotación o si no tienes bodega."
-    ],
-    "Flota Propia": [
-        "Mejor manejo de cargas muy voluminosas o especiales.",
-        "Coordinación directa con operador de transporte aliado.",
-        "Útil cuando necesitas ventanas horarias o manipulación específica."
-    ],
-}
+    # Fuente de datos
+    fuente = st.radio("Fuente de datos", ["Subir Excel", "Ruta local"], horizontal=True)
+    up = None
+    ruta = None
+    if fuente == "Subir Excel":
+        up = st.file_uploader("Carga tu Excel", type=["xlsx"])
+    else:
+        ruta = st.text_input("Ruta local (ej: operadores.xlsx)", "operadores.xlsx")
 
-# ---------- Utilidades de costos ----------
-def calcular_primera_milla(clase: str, precio: float, modalidad: str):
-    if modalidad == "Fulfillment":
-        return 0, "No aplica (stock en CD Ripley)."
-    if modalidad == "Flota Propia":
-        return None, "Caso a caso (tarifa acordada con operador aliado)."
-    if clase == "SP":
-        if precio < 24990:
-            return FIRST_MILE["SP"]["lt_24990"], "SP < $24.990"
+    # Presets de pesos
+    perfil = st.selectbox(
+        "Prioridad de decisión",
+        ["Balanceado", "Costo primero", "SLA primero", "Cobertura primero"],
+    )
+    presets = {
+        "Balanceado":    {'sla':0.35,'costo':0.25,'capacidad':0.20,'cobertura':0.20},
+        "Costo primero": {'sla':0.25,'costo':0.45,'capacidad':0.15,'cobertura':0.15},
+        "SLA primero":   {'sla':0.50,'costo':0.20,'capacidad':0.15,'cobertura':0.15},
+        "Cobertura primero": {'sla':0.25,'costo':0.20,'capacidad':0.15,'cobertura':0.40},
+    }
+    usar_preset = st.checkbox("Usar preset", value=True)
+
+    if usar_preset:
+        pesos = presets[perfil].copy()
+    else:
+        colw1, colw2 = st.columns(2)
+        with colw1:
+            wsla   = st.slider("Peso SLA", 0.0, 1.0, 0.35, 0.05)
+            wcap   = st.slider("Peso Capacidad", 0.0, 1.0, 0.20, 0.05)
+        with colw2:
+            wcosto = st.slider("Peso Costo", 0.0, 1.0, 0.25, 0.05)
+            wcob   = st.slider("Peso Cobertura", 0.0, 1.0, 0.20, 0.05)
+        s = wsla + wcosto + wcap + wcob
+        if s == 0:
+            pesos = presets["Balanceado"].copy()
+            st.info("Ajusté los pesos a ‘Balanceado’ porque la suma era 0.")
         else:
-            return FIRST_MILE["SP"]["ge_24990"], "SP ≥ $24.990"
-    return FIRST_MILE[clase]["flat"], f"{clase} tarifa fija"
+            pesos = {'sla':wsla/s, 'costo':wcosto/s, 'capacidad':wcap/s, 'cobertura':wcob/s}
 
-def tabla_costos_modalidad(modalidad: str, clase: str, precio: float):
-    pm_val, pm_nota = calcular_primera_milla(clase, precio, modalidad)
-    rev_val = REVERSE[clase]
-    pm_str = "Variable (caso a caso)" if pm_val is None else ("$0" if pm_val == 0 else f"${pm_val:,.0f}".replace(",", "."))
-    return pd.DataFrame({
-        "Concepto": ["Primera milla", "Logística inversa", "Cliente: despacho final"],
-        "Detalle": [pm_nota, f"{clase} ({CLASSES_INFO[clase]})", "Matriz estándar por zona/tamaño/promos"],
-        "Costo estimado": [pm_str, f"${rev_val:,.0f}".replace(",", "."), "Variable (misma lógica en todas las modalidades)"]
-    })
+    top_n = st.slider("¿Cuántas opciones mostrar?", 1, 10, 4)
 
-# ---------- Heurística para ORDEN (no mostramos puntajes) ----------
-def ordenar_modalidades(tiene_bodega: bool, voluminoso: bool, alta_rot: bool):
-    # Partimos de una lista base
-    mods = ["Operador Logístico", "Crossdock", "Fulfillment", "Flota Propia"]
-    # Reglas simples y transparentes para posicionar:
-    orden = []
-    # 1) Sin bodega -> Fulfillment primero
-    if not tiene_bodega:
-        orden.append("Fulfillment")
-    # 2) Con bodega y voluminoso -> Crossdock primero
-    if tiene_bodega and voluminoso:
-        orden.append("Crossdock")
-    # 3) Con bodega y no voluminoso -> Operador Logístico primero
-    if tiene_bodega and not voluminoso:
-        orden.append("Operador Logístico")
-    # 4) Alta rotación empuja Fulfillment hacia arriba si no está primero
-    if alta_rot and "Fulfillment" not in orden:
-        orden.append("Fulfillment")
-    # 5) Flota Propia usualmente al final, salvo muy voluminoso (ya se prioriza Crossdock)
-    if "Flota Propia" not in orden:
-        orden.append("Flota Propia")
-    # Completar con las que falten respetando el orden base
-    for m in mods:
-        if m not in orden:
-            orden.append(m)
-    # Devolver sin duplicados manteniendo el orden
-    seen = set(); result = []
-    for m in orden:
-        if m not in seen:
-            result.append(m); seen.add(m)
-    # Asegurar 4 elementos
-    return result[:4]
+    st.divider()
+    st.caption("Comparativas")
+    ver_comp_scl = st.checkbox("Mostrar comparativa de despacho en Santiago", value=True)
 
-# ---------- UI ----------
-st.markdown('<div class="ripley-title">Guía Logística Ripley – Orden de Recomendación</div>', unsafe_allow_html=True)
-st.markdown('<div class="ripley-sub">Mostramos todas las opciones (Primero → Cuarto) según tu caso. Luego revisa costos y beneficios para decidir.</div>', unsafe_allow_html=True)
+# ── Utilidades ────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def cargar_excel(uploaded_file=None, path=None) -> pd.DataFrame:
+    if uploaded_file is not None:
+        return pd.read_excel(uploaded_file)
+    return pd.read_excel(path)
 
-col1, col2 = st.columns(2)
-with col1:
-    bodega = st.radio("¿Tienes bodega propia?", ["Sí", "No"], index=0, horizontal=True)
-    voluminoso = st.radio("¿Tus productos son grandes/voluminosos?", ["Sí", "No"], index=1, horizontal=True)
-with col2:
-    rotacion = st.radio("¿Alta rotación y necesitas entregas rápidas?", ["Sí", "No"], index=0, horizontal=True)
-    clase = st.selectbox(
-        "Selecciona la clase logística más alta de tu orden",
-        list(CLASSES_INFO.keys()),
-        format_func=lambda k: f"{k} – {CLASSES_INFO[k]}",
-        index=2
+def to_numeric(df, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+def normalizar(col):
+    c = col.astype(float)
+    rng = c.max() - c.min()
+    if rng == 0:
+        return pd.Series(1.0, index=c.index)
+    return (c - c.min()) / rng
+
+def calcular_scores(df, pesos):
+    tmp = df.copy()
+
+    # 👉 Ajusta estos nombres a tus columnas reales si difieren:
+    req = ['SLA_on_time','Costo_x_envio','Capacidad_diaria','Cobertura_regiones']
+    faltan = [c for c in req if c not in tmp.columns]
+    if faltan:
+        st.error(f"Faltan columnas requeridas: {faltan}")
+        st.stop()
+
+    # Tipos numéricos e imputación conservadora
+    tmp = to_numeric(tmp, req)
+    for c in req:
+        if tmp[c].isna().all():
+            st.error(f"La columna {c} está completamente vacía.")
+            st.stop()
+        tmp[c] = tmp[c].fillna(tmp[c].median())
+
+    # Normalizaciones
+    tmp['n_sla']       = normalizar(tmp['SLA_on_time'])        # mayor mejor
+    tmp['n_capacidad'] = normalizar(tmp['Capacidad_diaria'])   # mayor mejor
+    tmp['n_cobertura'] = normalizar(tmp['Cobertura_regiones']) # mayor mejor
+    n_costo = normalizar(tmp['Costo_x_envio'])                 # menor mejor
+    tmp['n_costo'] = 1 - n_costo
+
+    # Score
+    tmp['score'] = (
+        pesos['sla']       * tmp['n_sla'] +
+        pesos['costo']     * tmp['n_costo'] +
+        pesos['capacidad'] * tmp['n_capacidad'] +
+        pesos['cobertura'] * tmp['n_cobertura']
     )
 
-precio = st.number_input("Precio referencial del producto (CLP)", min_value=0, value=29990, step=1000)
+    # Explicación simple (top2 fortalezas + trade-off)
+    def explicar(r):
+        vect = {
+            "SLA alto": r['n_sla'],
+            "Costo competitivo": r['n_costo'],
+            "Alta capacidad": r['n_capacidad'],
+            "Buena cobertura": r['n_cobertura'],
+        }
+        orden = sorted(vect.items(), key=lambda x: x[1], reverse=True)
+        fort = [orden[0][0], orden[1][0]]
+        deb  = min(vect, key=vect.get)
+        return f"Fortalezas: {', '.join(fort)}. Trade-off: {deb}."
 
-if st.button("Mostrar opciones en orden"):
-    tiene_bodega = (bodega == "Sí")
-    es_voluminoso = (voluminoso == "Sí")
-    alta_rot = (rotacion == "Sí")
+    tmp['explicacion'] = tmp.apply(explicar, axis=1)
 
-    orden = ordenar_modalidades(tiene_bodega, es_voluminoso, alta_rot)
-    ordinales = ["Primero", "Segundo", "Tercero", "Cuarto"]
+    # Orden + desempates
+    tmp = tmp.sort_values(
+        by=['score','n_sla','n_cobertura','n_costo','n_capacidad'],
+        ascending=[False, False, False, False, False]
+    ).reset_index(drop=True)
 
-    st.markdown("---")
-    st.subheader("📋 Orden recomendado (según tus respuestas)")
+    return tmp
 
-    for idx, modalidad in enumerate(orden):
-        st.markdown(f"### <span class='ordinal'>{ordinales[idx]}:</span> {modalidad}", unsafe_allow_html=True)
-        st.write(MODALITY_EXPLAIN[modalidad])
-        st.markdown("<div class='section-title'>Costos estimados</div>", unsafe_allow_html=True)
-        st.dataframe(tabla_costos_modalidad(modalidad, clase, float(precio)), use_container_width=True)
-        st.markdown("<div class='section-title'>Beneficios clave</div>", unsafe_allow_html=True)
-        for b in BENEFICIOS[modalidad]:
-            st.write(f"• {b}")
-        st.markdown("---")
+# ── Comparativa Santiago (valores confirmados) ────────────────────────────────
+CROSSDOCK_SCL = {
+    "SP":   {"ripley": 3990,  "externo": 3990},
+    "XXS":  {"ripley": 4990,  "externo": 7990},
+    "XS":   {"ripley": 9990,  "externo": 14990},
+    "S":    {"ripley": 9990,  "externo": 19990},
+    "M1":   {"ripley": 10990, "externo": 39990},
+    "M2":   {"ripley": 13990, "externo": 79990},
+    "L/XL": {"ripley": 16990, "externo": 199990},
+}
 
-st.caption("Nota: El costo para el cliente (despacho final) se calcula con la matriz estándar por zona y tamaño. Es el mismo cálculo en todas las modalidades.")
+# ── Carga, filtros y UI ───────────────────────────────────────────────────────
+try:
+    df = None
+    if fuente == "Subir Excel" and up is not None:
+        df = cargar_excel(uploaded_file=up)
+    elif fuente == "Ruta local":
+        df = cargar_excel(path=ruta)
+
+    if df is not None:
+        st.success("Datos cargados correctamente.")
+
+        # Filtros opcionales si existen
+        with st.expander("Filtros (opcional)"):
+            df_filtrado = df.copy()
+            if 'Categoria' in df.columns:
+                cat_sel = st.multiselect("Categoría", sorted(df['Categoria'].dropna().unique()))
+                if cat_sel: df_filtrado = df_filtrado[df_filtrado['Categoria'].isin(cat_sel)]
+            if 'Region' in df.columns:
+                reg_sel = st.multiselect("Región", sorted(df['Region'].dropna().unique()))
+                if reg_sel: df_filtrado = df_filtrado[df_filtrado['Region'].isin(reg_sel)]
+            if 'Tamano' in df.columns:
+                tam_sel = st.multiselect("Tamaño", sorted(df['Tamano'].dropna().unique()))
+                if tam_sel: df_filtrado = df_filtrado[df_filtrado['Tamano'].isin(tam_sel)]
+
+        st.markdown("Presiona **Ver opciones** para calcular y mostrar todas las alternativas ordenadas.")
+        if st.button("Ver opciones"):
+            ranking = calcular_scores(df_filtrado, pesos)
+
+            # Top N con ordinales
+            ordinal = {1:"Primero",2:"Segundo",3:"Tercero",4:"Cuarto",5:"Quinto",6:"Sexto",7:"Séptimo",8:"Octavo",9:"Noveno",10:"Décimo"}
+            top = ranking.head(top_n).copy()
+            top['Pos'] = np.arange(1, len(top)+1)
+
+            for _, row in top.iterrows():
+                pos = int(row['Pos'])
+                nombre = row['Operador'] if 'Operador' in row else 'Operador'
+                st.subheader(f"**{ordinal.get(pos, f'#{pos}')}** — {nombre}")
+                st.write(f"**Score:** {row['score']:.3f}")
+                kpi = st.columns(4)
+                with kpi[0]:
+                    st.metric("SLA on-time", f"{row['SLA_on_time']:.1f}%")
+                with kpi[1]:
+                    st.metric("Costo x envío", f"${row['Costo_x_envio']:.0f}")
+                with kpi[2]:
+                    st.metric("Capacidad diaria", f"{int(row['Capacidad_diaria'])}")
+                with kpi[3]:
+                    st.metric("Cobertura (regiones)", f"{int(row['Cobertura_regiones'])}")
+                st.caption(f"**¿Por qué quedó aquí?** {row['explicacion']}")
+                st.divider()
+
+            # Tabla completa
+            with st.expander("Ver tabla completa (todas las opciones en orden)"):
+                cols_show = ['Operador','score','SLA_on_time','Costo_x_envio','Capacidad_diaria','Cobertura_regiones']
+                cols_show = [c for c in cols_show if c in ranking.columns]
+                st.dataframe(ranking[cols_show], use_container_width=True)
+
+            # Comparativa Santiago (sin gráficos)
+            if ver_comp_scl:
+                st.markdown("### Comparativa de despacho en **Santiago** (Crossdock)")
+                comp = pd.DataFrame([
+                    {"Tamaño": k, "Ripley (Crossdock)": v["ripley"], "Operadores externos": v["externo"]}
+                    for k, v in CROSSDOCK_SCL.items()
+                ])
+                comp['Diferencia'] = comp['Operadores externos'] - comp['Ripley (Crossdock)']
+                comp['Nota'] = comp['Tamaño'].apply(
+                    lambda t: "Diferencia baja en pequeños" if t in ["SP","XXS","XS"]
+                              else "Diferencia significativa en medianos/grandes"
+                )
+                st.dataframe(comp, use_container_width=True)
+                st.info("**Claves**: En productos pequeños la diferencia es baja; en medianos/grandes, Ripley resulta mucho más conveniente (puede ser hasta 12× más barato).")
+    else:
+        st.warning("Carga un Excel o indica una ruta para comenzar.")
+
+except Exception as ex:
+    st.error(f"Ocurrió un error: {ex}")
